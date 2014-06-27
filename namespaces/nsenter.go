@@ -3,60 +3,10 @@
 package namespaces
 
 /*
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <linux/limits.h>
-#include <linux/sched.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <getopt.h>
-
-static const kBufSize = 256;
-
-void get_args(int *argc, char ***argv) {
-	// Read argv
-	int fd = open("/proc/self/cmdline", O_RDONLY);
-
-	// Read the whole commandline.
-	ssize_t contents_size = 0;
-	ssize_t contents_offset = 0;
-	char *contents = NULL;
-	ssize_t bytes_read = 0;
-	do {
-		contents_size += kBufSize;
-		contents = (char *) realloc(contents, contents_size);
-		bytes_read = read(fd, contents + contents_offset, contents_size - contents_offset);
-		contents_offset += bytes_read;
-	} while (bytes_read > 0);
-	close(fd);
-
-	// Parse the commandline into an argv. /proc/self/cmdline has \0 delimited args.
-	ssize_t i;
-	*argc = 0;
-	for (i = 0; i < contents_offset; i++) {
-		if (contents[i] == '\0') {
-			(*argc)++;
-		}
-	}
-	*argv = (char **) malloc(sizeof(char *) * ((*argc) + 1));
-	int idx;
-	for (idx = 0; idx < (*argc); idx++) {
-		(*argv)[idx] = contents;
-		contents += strlen(contents) + 1;
-	}
-	(*argv)[*argc] = NULL;
-}
-
-// Use raw setns syscall for versions of glibc that don't include it (namely glibc-2.12)
-#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 14
 #define _GNU_SOURCE
 #include <sched.h>
+// Use raw setns syscall for versions of glibc that don't include it (namely glibc-2.12)
+#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 14
 #include "syscall.h"
 #ifdef SYS_setns
 int setns(int fd, int nstype) {
@@ -64,125 +14,125 @@ int setns(int fd, int nstype) {
 }
 #endif
 #endif
-
-void print_usage() {
-	fprintf(stderr, "<binary> nsenter --nspid <pid> --containerjson <container_json> -- cmd1 arg1 arg2...\n");
-}
-
-void nsenter() {
-	int argc;
-	char **argv;
-	get_args(&argc, &argv);
-
-	// Ignore if this is not for us.
-	if (argc < 2 || strcmp(argv[1], "nsenter") != 0) {
-		return;
-	}
-
-	// USAGE: <binary> nsenter <PID> <process label> <container JSON> <argv>...
-	if (argc < 6) {
-		fprintf(stderr, "nsenter: Incorrect usage, not enough arguments\n");
-		exit(1);
-	}
-
-	static const struct option longopts[] = {
-		{ "nspid",         required_argument, NULL, 'n' },
-		{ "containerjson", required_argument, NULL, 'c' },
-		{ NULL,            0,                 NULL,  0  }
-	};
-
-	int c;
-	pid_t init_pid = -1;
-	char *init_pid_str = NULL;
-	char *container_json = NULL;
-	while ((c = getopt_long_only(argc, argv, "n:s:c:", longopts, NULL)) != -1) {
-		switch (c) {
-		case 'n':
-			init_pid_str = optarg;
-			break;
-		case 'c':
-			container_json = optarg;
-			break;
-		}
-	}
-
-	if (container_json == NULL || init_pid_str == NULL) {
-		print_usage();
-		exit(1);
-	}
-
-	init_pid = strtol(init_pid_str, NULL, 10);
-	if (errno != 0 || init_pid <= 0) {
-		fprintf(stderr, "nsenter: Failed to parse PID from \"%s\" with error: \"%s\"\n", init_pid_str, strerror(errno));
-		print_usage();
-		exit(1);
-	}
-
-	argc -= 3;
-	argv += 3;
-
-	// Setns on all supported namespaces.
-	char ns_dir[PATH_MAX];
-	memset(ns_dir, 0, PATH_MAX);
-	snprintf(ns_dir, PATH_MAX - 1, "/proc/%d/ns/", init_pid);
-	struct dirent *dent;
-	DIR *dir = opendir(ns_dir);
-	if (dir == NULL) {
-		fprintf(stderr, "nsenter: Failed to open directory \"%s\" with error: \"%s\"\n", ns_dir, strerror(errno));
-		exit(1);
-	}
-
-	while((dent = readdir(dir)) != NULL) {
-		if(strcmp(dent->d_name, ".") == 0 || strcmp(dent->d_name, "..") == 0 || strcmp(dent->d_name, "user") == 0) {
-			continue;
-		}
-
-		// Get and open the namespace for the init we are joining..
-		char buf[PATH_MAX];
-		memset(buf, 0, PATH_MAX);
-		snprintf(buf, PATH_MAX - 1, "%s%s", ns_dir, dent->d_name);
-		int fd = open(buf, O_RDONLY);
-		if (fd == -1) {
-			fprintf(stderr, "nsenter: Failed to open ns file \"%s\" for ns \"%s\" with error: \"%s\"\n", buf, dent->d_name, strerror(errno));
-			exit(1);
-		}
-
-		// Set the namespace.
-		if (setns(fd, 0) == -1) {
-			fprintf(stderr, "nsenter: Failed to setns for \"%s\" with error: \"%s\"\n", dent->d_name, strerror(errno));
-			exit(1);
-		}
-		close(fd);
-	}
-	closedir(dir);
-
-	// We must fork to actually enter the PID namespace.
-	int child = fork();
-	if (child == 0) {
-		// Finish executing, let the Go runtime take over.
-		return;
-	} else {
-		// Parent, wait for the child.
-		int status = 0;
-		if (waitpid(child, &status, 0) == -1) {
-			fprintf(stderr, "nsenter: Failed to waitpid with error: \"%s\"\n", strerror(errno));
-			exit(1);
-		}
-
-		// Forward the child's exit code or re-send its death signal.
-		if (WIFEXITED(status)) {
-			exit(WEXITSTATUS(status));
-		} else if (WIFSIGNALED(status)) {
-			kill(getpid(), WTERMSIG(status));
-		}
-		exit(1);
-	}
-
-	return;
-}
-
-__attribute__((constructor)) init() {
-	nsenter();
-}
 */
 import "C"
+
+import (
+	"fmt"
+	"io/ioutil"
+	"log"
+	"os"
+	"path"
+	"syscall"
+
+	"github.com/docker/libcontainer"
+	"github.com/docker/libcontainer/label"
+	"github.com/dotcloud/docker/pkg/system"
+)
+
+// Enter the namespace for the given PID and execute the command in the given arguments.
+func NsEnter(container *libcontainer.Config, nspid int, args []string) error {
+	if err := enterNamespace(nspid); err != nil {
+		return err
+	}
+	// clear the current processes env and replace it with the environment
+	// defined on the container
+	if err := LoadContainerEnvironment(container); err != nil {
+		return err
+	}
+	if err := FinalizeNamespace(container); err != nil {
+		return err
+	}
+
+	if container.ProcessLabel != "" {
+		if err := label.SetProcessLabel(container.ProcessLabel); err != nil {
+			return err
+		}
+	}
+
+	if err := system.Execv(args[0], args[0:], container.Env); err != nil {
+		return err
+	}
+	panic("unreachable")
+}
+
+func enterNamespace(nspid int) error {
+	nsDir := fmt.Sprintf("/proc/%d/ns/", nspid)
+	fileInfos, err := ioutil.ReadDir(nsDir)
+	if err != nil {
+		return err
+	}
+	for _, fi := range fileInfos {
+		ns := fi.Name()
+		if ns != "user" && ns != "mnt" { //TODO: why not user? TODO: why does mnt fail setns() with EINVAL
+			fn := path.Join(nsDir, ns)
+			f, err := os.Open(fn)
+			if err != nil {
+				log.Printf("Failed to open %q", fn)
+				return err
+			}
+			defer f.Close()
+
+			log.Printf("About to enter namespace %s using fd %v\n", fn, f.Fd())
+			err = setns(int(f.Fd()))
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// Need to fork to enter the PID namespace.
+	// But fork may fail with an assertion ([1]), so use clone instead.
+	//
+	// [1] http://sourceware.org/ml/glibc-bugs/2013-04/msg00139.html
+	childPid, err := system.Clone(0) // TODO: how to ensure SIGCHILD is sent to the parent?
+	if childPid == -1 {
+		log.Println("Clone failed: ", err)
+		return err
+	} else if childPid == 0 {
+		log.Println("Child running")
+		// Allow the child process to continue.
+		return nil
+	} else {
+		log.Printf("Parent running, child pid: %d\n", childPid)
+		// Exit with the child's exit code or kill the parent with the child's death signal.
+		child, err := os.FindProcess(childPid)
+		if err != nil {
+			log.Println("FindProcess failed: ", err)
+			return err
+		}
+		repeat:
+		childState, err := child.Wait()
+		if err != nil {
+			log.Println("Wait failed: ", err)
+			goto repeat //TODO: remove nasty hack
+			return err
+		}
+		childWaitStatus := childState.Sys().(syscall.WaitStatus)
+		if childState.Exited() {
+			os.Exit(childWaitStatus.ExitStatus())
+		} else if childWaitStatus.Signaled() {
+			syscall.Kill(os.Getpid(), childWaitStatus.Signal())
+		} else {
+			os.Exit(1)
+		}
+		panic("unreachable")
+	}
+}
+
+// Associate the calling thread with the namespace specified by the given file descriptor.
+// The file descriptor must refer to a namespace entry in /proc/[pid]/ns/, for some [pid].
+// The namespace entry may be of any type.
+//
+// Note: Docker's system.Setns is equivalent, but for Linux on AMD64 only.
+func setns(fd int) error {
+	// Join any type of namespace referred to by fd.
+	ret, err := C.setns(C.int(fd), 0)
+	if ret == 0 {
+		return nil
+	} else {
+		errNo := err.(syscall.Errno)
+		log.Printf("C.setns(%v) failed: %s %d\n", C.int(fd), err, int(errNo))
+		return err
+	}
+}

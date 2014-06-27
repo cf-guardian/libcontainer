@@ -8,7 +8,6 @@ import (
 	"strconv"
 
 	"github.com/docker/libcontainer"
-	"github.com/docker/libcontainer/label"
 	"github.com/dotcloud/docker/pkg/system"
 )
 
@@ -30,25 +29,3 @@ func ExecIn(container *libcontainer.Config, state *libcontainer.State, args []st
 	panic("unreachable")
 }
 
-// NsEnter is run after entering the namespace.
-func NsEnter(container *libcontainer.Config, nspid int, args []string) error {
-	// clear the current processes env and replace it with the environment
-	// defined on the container
-	if err := LoadContainerEnvironment(container); err != nil {
-		return err
-	}
-	if err := FinalizeNamespace(container); err != nil {
-		return err
-	}
-
-	if container.ProcessLabel != "" {
-		if err := label.SetProcessLabel(container.ProcessLabel); err != nil {
-			return err
-		}
-	}
-
-	if err := system.Execv(args[0], args[0:], container.Env); err != nil {
-		return err
-	}
-	panic("unreachable")
-}
