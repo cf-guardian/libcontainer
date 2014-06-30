@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"path"
+	"runtime"
 	"syscall"
 
 	"github.com/docker/libcontainer"
@@ -32,7 +33,7 @@ import (
 
 // Enter the namespace for the given PID and execute the command in the given arguments.
 func NsEnter(container *libcontainer.Config, nspid int, args []string) error {
-	if err := enterNamespace(nspid); err != nil {
+	if err := enterNamespaces(nspid); err != nil {
 		return err
 	}
 	// clear the current processes env and replace it with the environment
@@ -56,26 +57,18 @@ func NsEnter(container *libcontainer.Config, nspid int, args []string) error {
 	panic("unreachable")
 }
 
-func enterNamespace(nspid int) error {
-	nsDir := fmt.Sprintf("/proc/%d/ns/", nspid)
-	fileInfos, err := ioutil.ReadDir(nsDir)
+// On return, the current goroutine is locked to the current thread.
+// This is necessary to preserve the effects of setns.
+func enterNamespaces(nspid int) error {
+	runtime.LockOSThread()
+
+	nsDir, nss, err := findNamespaces(nspid)
 	if err != nil {
 		return err
 	}
-	for _, fi := range fileInfos {
-		ns := fi.Name()
-		if ns != "user" && ns != "mnt" { //TODO: why not user? TODO: why does mnt fail setns() with EINVAL
-			fn := path.Join(nsDir, ns)
-			f, err := os.Open(fn)
-			if err != nil {
-				log.Printf("Failed to open %q", fn)
-				return err
-			}
-			defer f.Close()
-
-			log.Printf("About to enter namespace %s using fd %v\n", fn, f.Fd())
-			err = setns(int(f.Fd()))
-			if err != nil {
+	for _, ns := range nss {
+		if ns != "user" {
+			if err = enterNamespace(nspid, nsDir, ns); err != nil {
 				return err
 			}
 		}
@@ -101,10 +94,10 @@ func enterNamespace(nspid int) error {
 			log.Println("FindProcess failed: ", err)
 			return err
 		}
-		repeat:
+	repeat:
 		childState, err := child.Wait()
 		if err != nil {
-			log.Println("Wait failed: ", err)
+			//log.Println("Wait failed: ", err)
 			goto repeat //TODO: remove nasty hack
 			return err
 		}
@@ -118,6 +111,56 @@ func enterNamespace(nspid int) error {
 		}
 		panic("unreachable")
 	}
+}
+
+// Determine the namespaces to enter based on the given PID.
+// The user namespace is not currently entered since the support for that namespace is incomplete.
+// The mount namespace must be entered after the PID namespace to ensure a valid proc file system.
+func findNamespaces(nspid int) (nsDir string, nss []string, err error) {
+	nsDir = fmt.Sprintf("/proc/%d/ns/", nspid)
+	fileInfos, err := ioutil.ReadDir(nsDir)
+	if err != nil {
+		return
+	}
+	for _, fi := range fileInfos {
+		log.Println("fileInfo name: ", fi.Name())
+	}
+	nss = make([]string, len(fileInfos))
+	user, mnt := -1, -1
+	for i, fi := range fileInfos {
+		ns := fi.Name()
+		if ns == "user" {
+			user = i
+		} else if ns == "mnt" {
+			mnt = i
+		}
+		nss[i] = ns
+	}
+	if user >= 0 {
+		nss = append(nss[0:user], nss[user+1:]...)
+		if mnt >= 0 && mnt > user {
+			mnt--
+		}
+	}
+	if mnt >= 0 {
+		nss = append(append(append(nss[0:mnt], nss[len(nss)-1]), nss[mnt+1:]...), nss[mnt])
+	}
+	log.Println("nss: ", nss)
+	return
+}
+
+func enterNamespace(nspid int, nsDir string, ns string) error {
+	fn := path.Join(nsDir, ns)
+	f, err := os.Open(fn)
+	if err != nil {
+		log.Printf("Failed to open %q", fn)
+		return err
+	}
+	defer f.Close()
+
+	log.Printf("About to enter namespace %s using fd %v\n", fn, f.Fd())
+	err = setns(int(f.Fd()))
+	return err
 }
 
 // Associate the calling thread with the namespace specified by the given file descriptor.
