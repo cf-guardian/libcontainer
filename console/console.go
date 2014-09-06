@@ -12,11 +12,17 @@ import (
 	"github.com/docker/libcontainer/label"
 )
 
+// for error injection testing
 var (
 	osChmod    = os.Chmod
 	osChown    = os.Chown
 	osCreate   = os.Create
 	osOpenFile = os.OpenFile
+
+	syscallOpen    = syscall.Open
+	syscallDup2    = syscall.Dup2
+	syscallSyscall = syscall.Syscall
+	syscallMount   = syscall.Mount
 )
 
 // Setup initializes the proper /dev/console inside the rootfs path
@@ -52,7 +58,7 @@ func Setup(rootfs, consolePath, mountLabel string) error {
 	// end TODO
 
 	// TODO: test
-	if err := syscall.Mount(consolePath, dest, "bind", syscall.MS_BIND, ""); err != nil {
+	if err := syscallMount(consolePath, dest, "bind", syscall.MS_BIND, ""); err != nil {
 		return fmt.Errorf("bind %s to %s %s", consolePath, dest, err)
 	}
 
@@ -66,17 +72,17 @@ func OpenAndDup(consolePath string) error {
 	}
 
 	// TODO: test
-	if err := syscall.Dup2(int(slave.Fd()), 0); err != nil {
+	if err := syscallDup2(int(slave.Fd()), 0); err != nil {
 		return err
 	}
 
 	// TODO: test
-	if err := syscall.Dup2(int(slave.Fd()), 1); err != nil {
+	if err := syscallDup2(int(slave.Fd()), 1); err != nil {
 		return err
 	}
 
 	// TODO: test
-	return syscall.Dup2(int(slave.Fd()), 2)
+	return syscallDup2(int(slave.Fd()), 2)
 }
 
 // Unlockpt unlocks the slave pseudoterminal device corresponding to the master pseudoterminal referred to by f.
@@ -130,9 +136,8 @@ func OpenPtmx() (*os.File, error) {
 // used to open the pty slave inside the container namespace
 func OpenTerminal(name string, flag int) (*os.File, error) {
 	// TODO: test
-	r, e := syscall.Open(name, flag, 0)
+	r, e := syscallOpen(name, flag, 0)
 	if e != nil {
-		// TODO: test
 		return nil, &os.PathError{Op: "open", Path: name, Err: e}
 	}
 	return os.NewFile(uintptr(r), name), nil
@@ -140,7 +145,7 @@ func OpenTerminal(name string, flag int) (*os.File, error) {
 
 func Ioctl(fd uintptr, flag, data uintptr) error {
 	// TODO: test
-	if _, _, err := syscall.Syscall(syscall.SYS_IOCTL, fd, flag, data); err != 0 {
+	if _, _, err := syscallSyscall(syscall.SYS_IOCTL, fd, flag, data); err != 0 {
 		return err
 	}
 
